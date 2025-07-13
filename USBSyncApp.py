@@ -5,6 +5,7 @@ import time
 import os
 import psutil
 import winsound
+import ctypes
 import threading
 import queue
 
@@ -25,20 +26,25 @@ LOG_FILE_PATH = os.path.join(SCRIPT_DIR, "usbsync.log")
 class USBSyncApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("USB Sync Tool - by Juan Hanekom")
-        self.root.geometry("650x450")
+        self.root.title("USB Sync Tool")
+        self.root.geometry("650x650")
 
         # --- Style ---
         self.style = ttk.Style(self.root)
         self.style.theme_use("clam")  # Use a cleaner, more modern theme
         self.sync_enabled = tk.BooleanVar(value=False)
         self.source_folder = tk.StringVar()
+        self.rename_enabled = tk.BooleanVar(value=False)
+        self.new_drive_label_var = tk.StringVar()
         self.drive_status = {}
         self.drive_threads = {}
 
         # Thread-safe communication
         self.ui_queue = queue.Queue()
         self.status_lock = threading.Lock()
+
+        # Register the validation command for the rename entry
+        self.vcmd = (self.root.register(self._validate_label), '%P')
 
         self.setup_ui()
         # Start the background polling thread
@@ -70,6 +76,19 @@ class USBSyncApp:
         sync_check.pack(side=tk.LEFT)
         log_button = ttk.Button(controls_frame, text="View Log File", command=self.view_log)
         log_button.pack(side=tk.RIGHT)
+
+        # --- Post-Sync Actions Frame ---
+        post_sync_frame = ttk.LabelFrame(main_frame, text="3. Post-Sync Actions", padding="10")
+        post_sync_frame.pack(fill=tk.X, pady=(0, 10))
+        post_sync_frame.columnconfigure(1, weight=1)
+
+        self.rename_enabled.trace_add("write", self._on_rename_toggled)
+        rename_check = ttk.Checkbutton(post_sync_frame, text="Rename drive after sync to:", variable=self.rename_enabled)
+        rename_check.grid(row=0, column=0, sticky="w")
+
+        self.rename_entry = ttk.Entry(post_sync_frame, textvariable=self.new_drive_label_var, validate="key", validatecommand=self.vcmd)
+        self.rename_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        self.rename_entry.state(['disabled'])
 
         # --- Drive List Frame ---
         drives_frame = ttk.LabelFrame(main_frame, text="Detected USB Drives", padding="10")
@@ -189,6 +208,21 @@ class USBSyncApp:
             self.status_var.set("Automatic sync disabled. Select a drive and click 'Sync Selected'.")
             self.manual_sync_button.state(['!disabled'])
 
+    def _on_rename_toggled(self, *args):
+        """Callback when the 'Rename drive' checkbox is changed."""
+        if self.rename_enabled.get():
+            self.rename_entry.state(['!disabled'])
+        else:
+            self.rename_entry.state(['disabled'])
+
+    def _validate_label(self, new_value):
+        """Validation function for the drive label entry."""
+        if " " in new_value:
+            return False
+        if len(new_value) > 11:
+            return False
+        return True
+
     def view_log(self):
         """Opens the log file with the default application."""
         if not os.path.exists(LOG_FILE_PATH):
@@ -248,13 +282,40 @@ class USBSyncApp:
             # Normalize the source path to use backslashes for robocopy's reliability on Windows
             src_normalized = os.path.normpath(src)
 
+            # Add CREATE_NO_WINDOW to prevent console flash
             cmd = ["robocopy", src_normalized, dest, "/MIR", "/R:1", "/W:1", "/NP", "/NDL", "/NFL", f"/LOG+:{LOG_FILE_PATH}"]
             print(f"Executing command for drive {drive}: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
 
             if result.returncode <= 8:
+                rename_successful = False
+                rename_attempted = False
+                # Check if renaming is enabled and a label is provided
+                if self.rename_enabled.get():
+                    new_label = self.new_drive_label_var.get().strip()
+                    if new_label:
+                        rename_attempted = True
+                        self.status_var.set(f"Renaming {drive} to '{new_label}'...")
+                        try:
+                            drive_letter = drive.strip('\\')
+                            # Input is pre-validated, so we can pass it directly.
+                            rename_cmd = ["cmd", "/c", "label", drive_letter, new_label]
+                            rename_result = subprocess.run(rename_cmd, capture_output=True, text=True, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+                            if rename_result.returncode == 0:
+                                rename_successful = True
+                            else:
+                                print(f"Warning: Failed to rename {drive}. Stderr: {rename_result.stderr.strip()}")
+                        except Exception as rename_e:
+                            print(f"Error during rename of {drive}: {rename_e}")
+
+                # Update final status
+                if rename_successful:
+                    self.status_var.set(f"Successfully synced and renamed {drive}.")
+                elif rename_attempted: # A rename was attempted but failed
+                    self.status_var.set(f"Sync to {drive} done, but rename failed.")
+                else: # No rename was attempted
+                    self.status_var.set(f"Successfully synced to {drive}.")
                 self._update_status(drive, "Done", "100%")
-                self.status_var.set(f"Successfully synced to {drive}.")
                 winsound.MessageBeep(winsound.MB_OK)
             else:
                 self._update_status(drive, f"Error (code {result.returncode}, see log)", "0%")

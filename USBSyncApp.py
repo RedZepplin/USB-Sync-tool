@@ -6,6 +6,9 @@ import os
 import psutil
 import winsound
 import ctypes
+import sys
+import shutil
+import configparser
 import threading
 import queue
 
@@ -26,7 +29,7 @@ LOG_FILE_PATH = os.path.join(SCRIPT_DIR, "usbsync.log")
 class USBSyncApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("USB Sync Tool")
+        self.packaged_mode = False
         self.root.geometry("650x650")
 
         # --- Style ---
@@ -46,11 +49,14 @@ class USBSyncApp:
         # Register the validation command for the rename entry
         self.vcmd = (self.root.register(self._validate_label), '%P')
 
+        self._check_for_packaged_mode()
+
         self.setup_ui()
         # Start the background polling thread
         self.sync_enabled.trace_add("write", self._on_sync_toggled)
         threading.Thread(target=self._poll_loop, daemon=True).start()
         self.process_queue()
+        
 
     def setup_ui(self):
         # Main container frame with padding
@@ -62,18 +68,18 @@ class USBSyncApp:
         source_frame.pack(fill=tk.X, pady=(0, 10))
         source_frame.columnconfigure(1, weight=1)  # Make the entry expand
 
-        select_button = ttk.Button(source_frame, text="Select Folder...", command=self.select_source)
-        select_button.grid(row=0, column=0, sticky="w")
+        self.select_button = ttk.Button(source_frame, text="Select Folder...", command=self.select_source)
+        self.select_button.grid(row=0, column=0, sticky="w")
 
-        source_entry = ttk.Entry(source_frame, textvariable=self.source_folder, state="readonly")
-        source_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        self.source_entry = ttk.Entry(source_frame, textvariable=self.source_folder, state="readonly")
+        self.source_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0))
 
         # --- Controls Frame ---
         controls_frame = ttk.LabelFrame(main_frame, text="2. Control Syncing", padding="10")
         controls_frame.pack(fill=tk.X, pady=(0, 10))
 
-        sync_check = ttk.Checkbutton(controls_frame, text="Automatic Sync", variable=self.sync_enabled)
-        sync_check.pack(side=tk.LEFT)
+        self.sync_check = ttk.Checkbutton(controls_frame, text="Automatic Sync", variable=self.sync_enabled)
+        self.sync_check.pack(side=tk.LEFT)
         log_button = ttk.Button(controls_frame, text="View Log File", command=self.view_log)
         log_button.pack(side=tk.RIGHT)
 
@@ -83,8 +89,8 @@ class USBSyncApp:
         post_sync_frame.columnconfigure(1, weight=1)
 
         self.rename_enabled.trace_add("write", self._on_rename_toggled)
-        rename_check = ttk.Checkbutton(post_sync_frame, text="Rename drive after sync to:", variable=self.rename_enabled)
-        rename_check.grid(row=0, column=0, sticky="w")
+        self.rename_check = ttk.Checkbutton(post_sync_frame, text="Rename drive after sync to:", variable=self.rename_enabled)
+        self.rename_check.grid(row=0, column=0, sticky="w")
 
         self.rename_entry = ttk.Entry(post_sync_frame, textvariable=self.new_drive_label_var, validate="key", validatecommand=self.vcmd)
         self.rename_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0))
@@ -120,6 +126,16 @@ class USBSyncApp:
         self.status_var = tk.StringVar(value="Ready. Select a source folder to begin.")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w", padding="2 5 2 5")
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # --- Context Menu ---
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        if not self.packaged_mode:
+            self.context_menu.add_command(label="Save Setup...", command=self._save_setup)
+
+        self.root.bind("<Button-3>", self._show_context_menu)
+
+        if self.packaged_mode:
+            self._lock_ui_for_packaged_mode()
 
     def select_source(self):
         folder = filedialog.askdirectory()
@@ -223,6 +239,20 @@ class USBSyncApp:
             return False
         return True
 
+    def _show_context_menu(self, event):
+        """Displays the right-click context menu."""
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def _lock_ui_for_packaged_mode(self):
+        """Disables UI elements when running in a pre-configured mode."""
+        self.root.title("USB Sync Tool (Pre-configured Setup)")
+        self.select_button.state(['disabled'])
+        self.rename_check.state(['disabled'])
+        self.rename_entry.state(['disabled'])
+
     def view_log(self):
         """Opens the log file with the default application."""
         if not os.path.exists(LOG_FILE_PATH):
@@ -325,6 +355,62 @@ class USBSyncApp:
             self._update_status(drive, "Critical Error", "0%")
             self.status_var.set(f"A critical error occurred while syncing to {drive}.")
             print(f"A critical error occurred while syncing to {drive}: {e}")
+
+    def _check_for_packaged_mode(self):
+        """On startup, check for a config file to enter packaged mode."""
+        config_path = os.path.join(SCRIPT_DIR, "config.ini")
+        if os.path.exists(config_path):
+            self.packaged_mode = True
+            try:
+                config = configparser.ConfigParser()
+                config.read(config_path)
+                
+                # Load settings from config file
+                loaded_label = config.get('Setup', 'new_drive_label', fallback="").strip()
+                
+                # Set application state
+                self.source_folder.set(os.path.join(SCRIPT_DIR, "sync"))
+                if loaded_label:
+                    self.rename_enabled.set(True)
+                    self.new_drive_label_var.set(loaded_label)
+
+            except Exception as e:
+                messagebox.showerror("Config Error", f"Could not load settings from config.ini:\n{e}")
+
+    def _save_setup(self):
+        """Saves the current configuration to a new, portable folder."""
+        if not self.source_folder.get():
+            messagebox.showwarning("Warning", "Please select a source folder before saving a setup.")
+            return
+
+        dest_path = filedialog.askdirectory(title="Select a Destination Folder for the Setup")
+        if not dest_path:
+            return
+
+        try:
+            setup_root = os.path.join(dest_path, "USBSync_Setup")
+            sync_folder_dest = os.path.join(setup_root, "sync")
+
+            # Create directories
+            os.makedirs(sync_folder_dest, exist_ok=True)
+
+            # Copy the application itself (script or .exe)
+            is_frozen = getattr(sys, 'frozen', False)
+            app_path = sys.executable if is_frozen else os.path.abspath(sys.argv[0])
+            shutil.copy(app_path, setup_root)
+
+            # Copy the source folder contents
+            shutil.copytree(self.source_folder.get(), sync_folder_dest, dirs_exist_ok=True)
+
+            # Write the config file
+            config = configparser.ConfigParser()
+            config['Setup'] = {'new_drive_label': self.new_drive_label_var.get()}
+            with open(os.path.join(setup_root, 'config.ini'), 'w') as configfile:
+                config.write(configfile)
+
+            messagebox.showinfo("Success", f"Setup created successfully at:\n{setup_root}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create setup package:\n{e}")
 
 if __name__ == "__main__":
     root = tk.Tk()

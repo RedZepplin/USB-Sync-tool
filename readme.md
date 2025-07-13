@@ -10,6 +10,8 @@ A simple yet powerful Windows utility with a graphical user interface (GUI) for 
   - **Automatic Sync:** When enabled, automatically copies files to any newly connected USB drive.
   - **Manual Sync:** Allows you to select a specific drive from the list and sync it with a button click.
 - **Robust Copying:** Leverages Windows' powerful `robocopy` command for reliable and efficient file mirroring.
+- **Drive Renaming:** Optionally rename drives automatically after a successful sync.
+- **Portable Setups:** Right-click to save the current configuration (source folder, rename settings) into a self-contained, distributable folder that's ready to run.
 - **Detailed Logging:** All sync operations are appended to a single `usbsync.log` file for easy debugging.
 - **Standalone Executable:** Can be easily compiled into a single `.exe` file for use on any Windows machine without needing Python installed.
 
